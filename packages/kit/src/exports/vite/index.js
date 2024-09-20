@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import colors from 'kleur';
 
@@ -44,12 +45,14 @@ import {
 	sveltekit_environment_context
 } from './module_ids.js';
 import { resolve_peer_dependency } from '../../utils/import.js';
-import { SSR_ENVIRONMENT_NAME } from './constants.js';
+import { node_environment_plugin } from './dev/default_environment.js';
+import { SVELTE_KIT_ASSETS } from '../../constants.js';
 
 /**
  * This is where we store the values that are needed in the `sveltekit_environment_context` virtual module.
  */
 const environment_context = /** @type {import('types').EnvironmentContext} */ ({});
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
 
 const cwd = process.cwd();
 
@@ -524,9 +527,11 @@ async function kit({ svelte_config }) {
 				// - Inlining styles. This requires communicating with the main process to collect dependencies. It should be possible (e.g. using import.meta.hot) but needs more investigation.
 				case sveltekit_environment_context: {
 					const { manifest_data, env, remote_address } = environment_context;
+					const supports_fs = true;
 
 					return dedent`
-						import { create_resolve } from "${runtime_base}/server/environment_context.js";
+						import { from_fs, create_resolve } from "${runtime_base}/server/environment_context.js";
+						const fs = ${supports_fs ? 'await import("node:fs")' : 'undefined'};
 
 						const resolve = create_resolve(${s(cwd)});
 
@@ -544,7 +549,19 @@ async function kit({ svelte_config }) {
 									fonts: [],
 									uses_env_dynamic_public: true
 								},
-								server_assets: {},
+								server_assets: ${
+									supports_fs
+										? dedent`
+												new Proxy(
+													{},
+													{
+														has: (_, file) => fs.existsSync(from_fs(file)),
+														get: (_, file) => fs.statSync(from_fs(file)).size
+													}
+												)
+									`
+										: '{}'
+								},
 								nodes: [
 									${manifest_data.nodes
 										.map((node, i) => {
@@ -569,6 +586,8 @@ async function kit({ svelte_config }) {
 													if (${component}) {
 														result.component = async () => {
 															const { module } = await resolve(${component});
+
+															return module.default;
 														}
 													}
 
@@ -578,7 +597,7 @@ async function kit({ svelte_config }) {
 														result.universal = module;
 														result.universal_id = ${universal};
 													}
-													
+
 													if (${server}) {
 														const { module } = await resolve(${server});
 
@@ -643,6 +662,8 @@ async function kit({ svelte_config }) {
 						export let env = ${s(env)};
 
 						export let remote_address = ${s(remote_address)};
+
+						export let assets = ${s(svelte_config.kit.paths.assets ? SVELTE_KIT_ASSETS : svelte_config.kit.paths.base)};
 					`;
 				}
 			}
@@ -1068,8 +1089,7 @@ async function kit({ svelte_config }) {
 	};
 
 	return [
-		// Creates the custom SSR environment if the factory function was passed to `kit.environments.ssr` in the Svelte config.
-		...(svelte_config.kit.environments.ssr?.(SSR_ENVIRONMENT_NAME) ?? []),
+		node_environment_plugin({ entrypoint: path.join(__dirname, './dev/node_entrypoint.js') }),
 		plugin_setup,
 		plugin_virtual_modules,
 		plugin_guard,

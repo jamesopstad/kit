@@ -33,4 +33,5 @@ declare module '__sveltekit/environment_context' {
 	export let manifest: SSRManifest;
 	export let env: Record<string, string>;
 	export let remote_address: string | undefined;
+	export let assets: string;
 }

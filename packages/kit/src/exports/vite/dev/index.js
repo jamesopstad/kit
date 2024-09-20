@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath, URL } from 'node:url';
+import { URL } from 'node:url';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import colors from 'kleur';
 import sirv from 'sirv';
-import { isCSSRequest, loadEnv, buildErrorMessage, createServerModuleRunner } from 'vite';
+import { isCSSRequest, loadEnv, buildErrorMessage } from 'vite';
 import { createReadableStream, getRequest, setResponse } from '../../../exports/node/index.js';
 import { installPolyfills } from '../../../exports/node/polyfills.js';
 import { coalesce_to_error } from '../../../utils/error.js';
@@ -18,7 +18,7 @@ import { not_found } from '../utils.js';
 import { SCHEME } from '../../../utils/url.js';
 import { check_feature } from '../../../utils/features.js';
 import { sveltekit_environment_context } from '../module_ids.js';
-import { SSR_ENVIRONMENT_NAME } from '../constants.js';
+import { is_fetchable_dev_environment } from './default_environment.js';
 
 const cwd = process.cwd();
 
@@ -446,31 +446,17 @@ export async function dev(vite, vite_config, svelte_config, environment_context)
 	environment_context.env = env;
 	const emulator = await svelte_config.kit.adapter?.emulate?.();
 
-	/**
-	 * The environment that was provided to `kit.environments.ssr` in the Svelte config.
-	 * @type { ((import('vite').DevEnvironment & { api?: { getHandler: (opts: { entrypoint: string }) => Promise<(req: Request) => Promise<Response>> }})) | undefined }
-	 */
-	const devEnv = vite.environments[SSR_ENVIRONMENT_NAME];
+	const dev_env =
+		/** @type {import('vite').DevEnvironment & { dispatchFetch: (request: Request) => Promise<Response> }} */ (
+			vite.environments.ssr
+		);
 
-	const __dirname = fileURLToPath(new URL('.', import.meta.url));
-
-	/** @type {((req: Request) => Promise<Response>) | undefined} */
-	let handler;
-
-	// Create the handler for the Cloudflare or Node environment if it exists.
-	if (devEnv) {
-		if (devEnv.api) {
-			handler = await devEnv.api.getHandler({
-				entrypoint: path.join(__dirname, 'cloudflare_entrypoint.js')
-			});
-			console.log('Running in Cloudflare environment');
-		} else {
-			const module_runner = createServerModuleRunner(vite.environments[SSR_ENVIRONMENT_NAME]);
-			const entrypoint = await module_runner.import(path.join(__dirname, 'node_entrypoint.js'));
-			handler = entrypoint.default.fetch;
-			console.log('Running in Node environment');
-		}
-	}
+	dev_env.hot.on('error', (err) => {
+		vite.environments.client.hot.send({
+			type: 'error',
+			err
+		});
+	});
 
 	return () => {
 		const serve_static_middleware = vite.middlewares.stack.find(
@@ -575,9 +561,8 @@ export async function dev(vite, vite_config, svelte_config, environment_context)
 					return;
 				}
 
-				// Render using the environment handler if it has been created. Else, fallback to the default behaviour.
-				const rendered = handler
-					? await handler(request)
+				const rendered = is_fetchable_dev_environment(dev_env)
+					? await dev_env.dispatchFetch(request)
 					: await server.respond(request, {
 							getClientAddress: () => {
 								const { remoteAddress } = req.socket;
